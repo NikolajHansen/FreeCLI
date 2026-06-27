@@ -152,7 +152,7 @@ static int ensure_token(IBMPriv *priv) {
 }
 
 static char *build_body(const ChatBuffer *history, const char *model,
-                         const char *project_id, int n_choices) {
+                         const char *project_id) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "model_id",
                             (model && *model) ? model : IBM_DEFAULT_MODEL);
@@ -172,8 +172,6 @@ static char *build_body(const ChatBuffer *history, const char *model,
 
     cJSON *params = cJSON_AddObjectToObject(root, "parameters");
     cJSON_AddNumberToObject(params, "max_new_tokens", IBM_MAX_TOKENS);
-    if (n_choices > 1)
-        cJSON_AddNumberToObject(params, "n", n_choices);
 
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -204,8 +202,7 @@ static ProviderReply *ibm_send(Provider *p, const ProviderRequest *req) {
              "https://%s.ml.cloud.ibm.com/ml/v1/text/chat?version=%s",
              priv->region, IBM_API_VERSION);
 
-    char *body = build_body(req->history, model, priv->project_id,
-                             req->n_choices > 1 ? req->n_choices : 1);
+    char *body = build_body(req->history, model, priv->project_id);
     if (!body) return NULL;
 
     CURL *curl = curl_easy_init();
@@ -252,21 +249,6 @@ static ProviderReply *ibm_send(Provider *p, const ProviderRequest *req) {
             cJSON *content = cJSON_GetObjectItemCaseSensitive(message, "content");
             if (cJSON_IsString(content) && content->valuestring)
                 reply->content = strdup(content->valuestring);
-
-            if (nc > 1) {
-                reply->all_choices = calloc(nc, sizeof(char *));
-                if (reply->all_choices) {
-                    reply->n_choices = nc;
-                    for (int i = 0; i < nc; i++) {
-                        cJSON *ch  = cJSON_GetArrayItem(choices, i);
-                        cJSON *msg = cJSON_GetObjectItemCaseSensitive(ch, "message");
-                        cJSON *cnt = cJSON_GetObjectItemCaseSensitive(msg, "content");
-                        reply->all_choices[i] = (cJSON_IsString(cnt) && cnt->valuestring)
-                                                ? strdup(cnt->valuestring)
-                                                : strdup("");
-                    }
-                }
-            }
         }
         cJSON_Delete(root);
     }

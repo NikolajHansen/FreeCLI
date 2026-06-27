@@ -89,7 +89,6 @@ typedef struct {
     uint32_t  msg_count;
     char     *model;       /* heap-allocated, may be NULL */
     char     *provider_id; /* heap-allocated, may be NULL → defaults to "xai" */
-    int       n_choices;   /* 1 = single response (default) */
 } RequestArg;
 
 /*
@@ -193,30 +192,14 @@ static void *handle_request(void *arg) {
     int iters = 0;
     /* Only xAI currently has ask_ai tool support injected.
      * Multi-choice requests bypass the agentic loop entirely. */
-    int supports_tools = (ra->n_choices == 1) &&
-                         (ra->provider_id == NULL ||
+    int supports_tools = (ra->provider_id == NULL ||
                           strcmp(ra->provider_id, "xai") == 0);
 
-    if (ra->n_choices > 1) {
-        /* Direct single call — no tools, no loop */
-        ProviderRequest req = {
-            .history      = &cb,
-            .model        = model,
-            .enable_tools = 0,
-            .n_choices    = ra->n_choices,
-        };
-        pr = prov->send(prov, &req);
-        if (pr) {
-            final_content   = pr->content;
-            final_reasoning = pr->reasoning;
-        }
-    } else {
     while (iters++ < MAX_TOOL_ITERS) {
         ProviderRequest req = {
             .history      = &cb,
             .model        = model,
             .enable_tools = supports_tools ? 1 : 0,
-            .n_choices    = 1,
         };
         pr = prov->send(prov, &req);
 
@@ -271,27 +254,12 @@ static void *handle_request(void *arg) {
         provider_reply_free(pr);
         pr = NULL;
     }
-    } /* end else (n_choices == 1 agentic loop) */
 
     /* Send final reply to TUI */
     const char *content   = final_content   ? final_content   : "";
     const char *reasoning = final_reasoning ? final_reasoning : NULL;
 
-    if (pr && pr->n_choices > 1 && pr->all_choices) {
-        /* Multi-choice: let the user pick */
-        uint32_t  pl_len;
-        uint8_t  *pl = ipc_encode_rep_choices(ra->session_idx,
-                                               (const char **)pr->all_choices,
-                                               pr->n_choices, &pl_len);
-        if (pl) {
-            ipc_send(ra->tui_fd, MSG_REP_CHOICES, ra->corr_id, pl, pl_len);
-            free(pl);
-        } else {
-            const char *err = "internal encode error (choices)";
-            ipc_send(ra->tui_fd, MSG_REP_ERROR, ra->corr_id,
-                     err, (uint32_t)strlen(err));
-        }
-    } else {
+    {
         uint32_t  payload_len;
         uint8_t  *payload = ipc_encode_rep_final(ra->session_idx, content, reasoning,
                                                   &payload_len);
@@ -304,12 +272,8 @@ static void *handle_request(void *arg) {
         }
     }
 
-    /*
-     * Auto-name: always use xAI grok-3-mini-fast for naming regardless of
-     * the session's provider (cheap, fast, reliable).
-     */
-    /* Auto-name only for single-choice first turns */
-    if (ra->msg_count == 1 && ra->n_choices == 1 && content && *content) {
+    /* Auto-name on first turn */
+    if (ra->msg_count == 1 && content && *content) {
         ChatBuffer name_cb;
         chat_init(&name_cb);
         const char *user_q = (cb.count > 0 && cb.msgs[0].is_user)
@@ -437,8 +401,7 @@ int main(int argc, char *argv[]) {
                                      &ra->texts,
                                      &ra->is_user,
                                      &ra->model,
-                                     &ra->provider_id,
-                                     &ra->n_choices) != 0) {
+                                     &ra->provider_id) != 0) {
                 free(ra);
             } else {
                 pthread_t tid;

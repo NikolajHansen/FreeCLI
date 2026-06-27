@@ -10,13 +10,11 @@ typedef struct {
     int            *focus;
     void          (*draw)(void);
     void          (*save_session)(const SessionManager *sm, int idx);
-    void          (*delete_session)(int idx);   /* delete session by index */
+    void          (*delete_session)(int idx);
     void          (*set_model)(const char *model);
     void          (*set_provider)(const char *provider_id);
-    void          (*set_n_choices)(int n);
     const char     *current_model;
-    const char     *current_provider;  /* "xai", "anthropic", "google", "ibm" */
-    int             n_choices_val;     /* current value (1-5) */
+    const char     *current_provider;
 } CmdCtx;
 
 int         cmd_dispatch(const char *input, CmdCtx *ctx);

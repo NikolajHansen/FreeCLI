@@ -107,13 +107,11 @@ static void add_ask_ai_tool(cJSON *tools_array) {
 
 /* --- Build JSON request body --- */
 static char *build_body(const ChatBuffer *history, const char *model,
-                         int enable_tools, int n_choices) {
+                         int enable_tools) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "model",
                             (model && *model) ? model : XAI_DEFAULT_MODEL);
     cJSON_AddNumberToObject(root, "temperature", 0.7);
-    if (n_choices > 1)
-        cJSON_AddNumberToObject(root, "n", n_choices);
 
     cJSON *messages = cJSON_AddArrayToObject(root, "messages");
 
@@ -207,8 +205,7 @@ static ProviderReply *xai_send(Provider *p, const ProviderRequest *req) {
     XAIPriv *priv = (XAIPriv *)p->priv;
     if (!priv || !priv->api_key) return NULL;
 
-    char *body = build_body(req->history, req->model, req->enable_tools,
-                             req->n_choices > 1 ? req->n_choices : 1);
+    char *body = build_body(req->history, req->model, req->enable_tools);
     if (!body) return NULL;
 
     CURL *curl = curl_easy_init();
@@ -283,22 +280,6 @@ static ProviderReply *xai_send(Provider *p, const ProviderRequest *req) {
                 }
             }
 
-            /* Collect all N choices when n > 1 */
-            if (nc > 1) {
-                reply->all_choices = calloc(nc, sizeof(char *));
-                if (reply->all_choices) {
-                    reply->n_choices = nc;
-                    for (int i = 0; i < nc; i++) {
-                        cJSON *ch  = cJSON_GetArrayItem(choices, i);
-                        cJSON *msg = cJSON_GetObjectItemCaseSensitive(ch, "message");
-                        cJSON *cnt = cJSON_GetObjectItemCaseSensitive(msg, "content");
-                        if (cJSON_IsString(cnt) && cnt->valuestring)
-                            reply->all_choices[i] = strdup(cnt->valuestring);
-                        else
-                            reply->all_choices[i] = strdup("");
-                    }
-                }
-            }
         }
         cJSON_Delete(root);
     }

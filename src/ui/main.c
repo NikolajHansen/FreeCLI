@@ -53,21 +53,15 @@ typedef struct {
 static InFlight in_flight[MAX_IN_FLIGHT];
 static int      spin_tick = 0;           /* incremented every 100ms poll */
 
-/* --- Pending multi-choice picker --- */
+/* --- Pending choice picker (auto-detected LLM-offered options) --- */
 
 #define MAX_CHOICES 8
 
-typedef enum {
-    CHOICES_DRAFT  = 0,  /* N parallel drafts — selected becomes assistant message */
-    CHOICES_OPTION = 1,  /* LLM-offered options — selected becomes next user message */
-} ChoicesMode;
-
 typedef struct {
-    int         session_idx;
-    int         n;
-    char       *choices[MAX_CHOICES];
-    int         selected;   /* 0-based highlighted choice */
-    ChoicesMode mode;
+    int   session_idx;
+    int   n;
+    char *choices[MAX_CHOICES];
+    int   selected;
 } PendingChoices;
 
 static PendingChoices *pending_choices = NULL;
@@ -159,7 +153,6 @@ static net_fd_t        ipc_fd        = NET_INVALID;
 static uint64_t        next_corr     = 1;
 static char            selected_model[64]    = "grok-3-fast";
 static char            selected_provider[32] = "xai";
-static int             selected_n_choices    = 1;
 static char            userhost[128]         = "user@host";
 
 /* --- Backend process management --- */
@@ -578,12 +571,8 @@ static void do_set_provider(const char *provider_id) {
     }
 }
 
-static void do_set_n_choices(int n) {
-    if (n >= 1 && n <= MAX_CHOICES) selected_n_choices = n;
-}
-
 /*
- * Scan text for a numbered or lettered choice list (e.g. "1. ...\n2. ...\n3. ...").
+ * Scan text for a numbered or lettered choice list.
  * Returns number of choices found (0 if none / fewer than 2).
  * Populates pc->choices[] and pc->n on success.
  * pc must be zero-initialised by caller.
@@ -707,7 +696,6 @@ static void accept_choice(int idx) {
 
     char *chosen = pending_choices->choices[idx]
                    ? strdup(pending_choices->choices[idx]) : NULL;
-    ChoicesMode mode = pending_choices->mode;
 
     for (int i = 0; i < pending_choices->n; i++)
         free(pending_choices->choices[i]);
@@ -716,18 +704,10 @@ static void accept_choice(int idx) {
 
     if (!chosen) return;
 
-    if (mode == CHOICES_DRAFT) {
-        /* Draft picker: chosen text becomes the accepted assistant reply */
-        ChatBuffer *cb = &sessions.sessions[sidx].chat;
-        chat_add_r(cb, chosen, false, NULL);
-        cb->scroll = 0;
-        persist_save_session(&sessions, sidx);
-    } else {
-        /* Option picker: chosen text becomes the next user message */
-        sm_select(&sessions, sidx);
-        sessions.active = sidx;
-        submit_text(chosen);
-    }
+    /* Chosen text becomes the next user message */
+    sm_select(&sessions, sidx);
+    sessions.active = sidx;
+    submit_text(chosen);
     free(chosen);
 }
 
@@ -743,9 +723,8 @@ static void draw_choice_picker(WINDOW *win, PendingChoices *pc) {
     wattron(win, A_DIM);
     wmove(win, start_row, 0);
     whline(win, ACS_HLINE, cols);
-    const char *action = (pc->mode == CHOICES_OPTION) ? "Select option" : "Pick response";
     char hdr[64];
-    snprintf(hdr, sizeof(hdr), "[ %s: 1-%d  ↑↓  Enter ]", action, n);
+    snprintf(hdr, sizeof(hdr), "[ Select option: 1-%d  ↑↓  Enter ]", n);
     mvwaddstr(win, start_row, 2, hdr);
     wattroff(win, A_DIM);
 
@@ -829,7 +808,6 @@ static void check_ipc(void) {
                     if (pc && detect_choices(reply_text, pc) >= 2) {
                         pc->session_idx = (int)sidx;
                         pc->selected    = 0;
-                        pc->mode        = CHOICES_OPTION;
                         if (pending_choices) {
                             for (int i = 0; i < pending_choices->n; i++)
                                 free(pending_choices->choices[i]);
@@ -845,43 +823,6 @@ static void check_ipc(void) {
             free(reasoning);
         }
         draw_layout();
-    } else if (msg.type == MSG_REP_CHOICES && msg.payload) {
-        uint32_t sidx = 0;
-        char **choices = NULL;
-        int n = 0;
-        if (ipc_decode_rep_choices(msg.payload, msg.payload_len,
-                                    &sidx, &choices, &n) == 0 && n > 0) {
-            int real_sidx = inflight_remove(msg.corr_id);
-            if (real_sidx >= 0) sidx = (uint32_t)real_sidx;
-
-            ChatBuffer *cb = ((int)sidx < sm_count(&sessions))
-                ? &sessions.sessions[sidx].chat
-                : sm_active_chat(&sessions);
-            if (cb) chat_remove_last(cb);   /* remove "..." placeholder */
-
-            /* Free previous pending choices if any */
-            if (pending_choices) {
-                for (int i = 0; i < pending_choices->n; i++)
-                    free(pending_choices->choices[i]);
-                free(pending_choices);
-            }
-            pending_choices = calloc(1, sizeof(PendingChoices));
-            if (pending_choices) {
-                pending_choices->session_idx = (int)sidx;
-                pending_choices->n = n > MAX_CHOICES ? MAX_CHOICES : n;
-                pending_choices->mode = CHOICES_DRAFT;
-                for (int i = 0; i < pending_choices->n; i++)
-                    pending_choices->choices[i] = choices[i] ? choices[i] : strdup("");
-                pending_choices->selected = 0;
-            } else {
-                for (int i = 0; i < n; i++) free(choices[i]);
-            }
-            free(choices);
-        }
-        draw_layout();
-        /* Draw choice picker on top of chat */
-        if (pending_choices && pending_choices->session_idx == sessions.active)
-            draw_choice_picker(win_main, pending_choices);
     } else if (msg.type == MSG_REP_ERROR) {
         int sidx = inflight_remove(msg.corr_id);
         ChatBuffer *cb = (sidx >= 0 && sidx < sm_count(&sessions))
@@ -967,7 +908,6 @@ static void submit_text(const char *text) {
                                             msg_count, texts, is_user,
                                             selected_model,
                                             selected_provider,
-                                            1,   /* n_choices always 1 for option replies */
                                             &payload_len);
     free(texts);
     free(is_user);
@@ -1000,17 +940,15 @@ static void submit_message(void) {
             .delete_session   = do_delete_session,
             .set_model        = do_set_model,
             .set_provider     = do_set_provider,
-            .set_n_choices    = do_set_n_choices,
             .current_model    = selected_model,
             .current_provider = selected_provider,
-            .n_choices_val    = selected_n_choices,
         };
         cmd_dispatch(cmd_buf, &ctx);
         return;
     }
 
-    /* Dismiss any pending option picker — user typed instead of selecting */
-    if (pending_choices && pending_choices->mode == CHOICES_OPTION) {
+    /* Dismiss any pending choice picker — user typed instead of selecting */
+    if (pending_choices) {
         for (int i = 0; i < pending_choices->n; i++)
             free(pending_choices->choices[i]);
         free(pending_choices);
@@ -1042,7 +980,6 @@ static void submit_message(void) {
                                             msg_count, texts, is_user,
                                             selected_model,
                                             selected_provider,
-                                            selected_n_choices,
                                             &payload_len);
     free(texts);
     free(is_user);

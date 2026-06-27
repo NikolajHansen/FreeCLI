@@ -56,16 +56,14 @@ uint8_t *ipc_encode_req_send(uint32_t session_idx,
                               const uint8_t     *is_user,
                               const char        *model,
                               const char        *provider,
-                              int                n_choices,
                               uint32_t          *out_len) {
     uint32_t mlen = model    ? (uint32_t)strlen(model)    : 0;
     uint32_t plen = provider ? (uint32_t)strlen(provider) : 0;
     uint32_t sz = sizeof(uint32_t) * 2;
     for (uint32_t i = 0; i < msg_count; i++)
         sz += 1 + sizeof(uint32_t) + (uint32_t)strlen(texts[i]);
-    sz += sizeof(uint32_t) + mlen;   /* model */
-    sz += sizeof(uint32_t) + plen;   /* provider */
-    sz += sizeof(uint32_t);          /* n_choices */
+    sz += sizeof(uint32_t) + mlen;
+    sz += sizeof(uint32_t) + plen;
 
     uint8_t *buf = malloc(sz);
     if (!buf) return NULL;
@@ -83,8 +81,6 @@ uint8_t *ipc_encode_req_send(uint32_t session_idx,
     if (mlen) { memcpy(p, model, mlen); p += mlen; }
     memcpy(p, &plen, sizeof(uint32_t)); p += sizeof(uint32_t);
     if (plen) { memcpy(p, provider, plen); p += plen; }
-    uint32_t nc = (uint32_t)(n_choices > 1 ? n_choices : 1);
-    memcpy(p, &nc, sizeof(uint32_t));
 
     *out_len = sz;
     return buf;
@@ -96,8 +92,7 @@ int ipc_decode_req_send(const uint8_t *buf, uint32_t buf_len,
                          char    ***texts,
                          uint8_t  **is_user,
                          char     **model,
-                         char     **provider,
-                         int       *n_choices) {
+                         char     **provider) {
     if (buf_len < 8) return -1;
     const uint8_t *p   = buf;
     const uint8_t *end = buf + buf_len;
@@ -109,7 +104,6 @@ int ipc_decode_req_send(const uint8_t *buf, uint32_t buf_len,
     *is_user  = calloc(*msg_count, 1);
     *model    = NULL;
     *provider = NULL;
-    if (n_choices) *n_choices = 1;
     if (!*texts || !*is_user) return -1;
 
     for (uint32_t i = 0; i < *msg_count; i++) {
@@ -143,15 +137,7 @@ int ipc_decode_req_send(const uint8_t *buf, uint32_t buf_len,
         if (plen > 0 && p + plen <= end) {
             *provider = malloc(plen + 1);
             if (*provider) { memcpy(*provider, p, plen); (*provider)[plen] = '\0'; }
-            p += plen;
         }
-    }
-
-    /* Optional n_choices tail */
-    if (n_choices && p + sizeof(uint32_t) <= end) {
-        uint32_t nc;
-        memcpy(&nc, p, sizeof(uint32_t));
-        *n_choices = (int)(nc > 0 ? nc : 1);
     }
     return 0;
 }
@@ -297,67 +283,6 @@ int ipc_decode_session_rename(const uint8_t *buf, uint32_t buf_len,
     if (tlen > 0 && p + tlen <= buf + buf_len) {
         *topic = malloc(tlen + 1);
         if (*topic) { memcpy(*topic, p, tlen); (*topic)[tlen] = '\0'; }
-    }
-    return 0;
-}
-
-/* --- MSG_REP_CHOICES --- */
-
-uint8_t *ipc_encode_rep_choices(uint32_t     session_idx,
-                                 const char **choices,
-                                 int          n,
-                                 uint32_t    *out_len) {
-    uint32_t nc = (uint32_t)n;
-    uint32_t sz = sizeof(uint32_t) * 2; /* session_idx + count */
-    for (int i = 0; i < n; i++)
-        sz += sizeof(uint32_t) + (uint32_t)(choices[i] ? strlen(choices[i]) : 0);
-
-    uint8_t *buf = malloc(sz);
-    if (!buf) return NULL;
-    uint8_t *p = buf;
-
-    memcpy(p, &session_idx, sizeof(uint32_t)); p += sizeof(uint32_t);
-    memcpy(p, &nc,          sizeof(uint32_t)); p += sizeof(uint32_t);
-    for (int i = 0; i < n; i++) {
-        uint32_t clen = (uint32_t)(choices[i] ? strlen(choices[i]) : 0);
-        memcpy(p, &clen, sizeof(uint32_t)); p += sizeof(uint32_t);
-        if (clen) { memcpy(p, choices[i], clen); p += clen; }
-    }
-
-    *out_len = sz;
-    return buf;
-}
-
-int ipc_decode_rep_choices(const uint8_t *buf, uint32_t buf_len,
-                            uint32_t *session_idx,
-                            char   ***choices,
-                            int      *n) {
-    *choices = NULL;
-    *n = 0;
-    if (buf_len < 8) return -1;
-    const uint8_t *p   = buf;
-    const uint8_t *end = buf + buf_len;
-
-    memcpy(session_idx, p, sizeof(uint32_t)); p += sizeof(uint32_t);
-    uint32_t nc;
-    memcpy(&nc, p, sizeof(uint32_t)); p += sizeof(uint32_t);
-    if (nc == 0) return -1;
-
-    *choices = calloc(nc, sizeof(char *));
-    if (!*choices) return -1;
-    *n = (int)nc;
-
-    for (uint32_t i = 0; i < nc; i++) {
-        if (p + sizeof(uint32_t) > end) break;
-        uint32_t clen;
-        memcpy(&clen, p, sizeof(uint32_t)); p += sizeof(uint32_t);
-        if (p + clen > end) break;
-        (*choices)[i] = malloc(clen + 1);
-        if ((*choices)[i]) {
-            memcpy((*choices)[i], p, clen);
-            (*choices)[i][clen] = '\0';
-        }
-        p += clen;
     }
     return 0;
 }

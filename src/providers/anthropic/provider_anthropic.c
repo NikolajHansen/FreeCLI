@@ -153,24 +153,7 @@ static ProviderReply *anthropic_send(Provider *p, const ProviderRequest *req) {
 
     ProviderReply *reply = calloc(1, sizeof(ProviderReply));
     if (!reply) return NULL;
-
-    int nc = (req->n_choices > 1) ? req->n_choices : 1;
-
-    if (nc == 1) {
-        /* Single call — existing behaviour */
-        reply->content = anthropic_call_once(priv, req->history, req->model);
-    } else {
-        /* Anthropic has no native n>1; make N sequential calls */
-        reply->all_choices = calloc(nc, sizeof(char *));
-        if (!reply->all_choices) { free(reply); return NULL; }
-        reply->n_choices = nc;
-        for (int i = 0; i < nc; i++) {
-            reply->all_choices[i] = anthropic_call_once(priv, req->history, req->model);
-            if (!reply->all_choices[i]) reply->all_choices[i] = strdup("");
-        }
-        reply->content = reply->all_choices[0]
-                         ? strdup(reply->all_choices[0]) : NULL;
-    }
+    reply->content = anthropic_call_once(priv, req->history, req->model);
     return reply;
 }
 
