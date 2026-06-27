@@ -54,7 +54,7 @@ static char *read_api_key(void) {
     return (*buf) ? strdup(buf) : NULL;
 }
 
-static char *build_body(const ChatBuffer *history) {
+static char *build_body(const ChatBuffer *history, int n_choices) {
     cJSON *root     = cJSON_CreateObject();
     cJSON *contents = cJSON_AddArrayToObject(root, "contents");
 
@@ -78,6 +78,8 @@ static char *build_body(const ChatBuffer *history) {
 
     cJSON *gen_cfg = cJSON_AddObjectToObject(root, "generationConfig");
     cJSON_AddNumberToObject(gen_cfg, "maxOutputTokens", GOOGLE_MAX_TOKENS);
+    if (n_choices > 1)
+        cJSON_AddNumberToObject(gen_cfg, "candidateCount", n_choices);
 
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -103,7 +105,7 @@ static ProviderReply *google_send(Provider *p, const ProviderRequest *req) {
     char url[512];
     snprintf(url, sizeof(url), "%s%s:generateContent", GOOGLE_BASE_URL, model);
 
-    char *body = build_body(req->history);
+    char *body = build_body(req->history, req->n_choices > 1 ? req->n_choices : 1);
     if (!body) return NULL;
 
     CURL *curl = curl_easy_init();
@@ -140,9 +142,11 @@ static ProviderReply *google_send(Provider *p, const ProviderRequest *req) {
     cJSON *root = cJSON_Parse(rb.data);
     free(rb.data);
     if (root) {
-        /* candidates[0].content.parts[0].text */
+        /* candidates[i].content.parts[0].text */
         cJSON *cands = cJSON_GetObjectItemCaseSensitive(root, "candidates");
-        if (cJSON_IsArray(cands) && cJSON_GetArraySize(cands) > 0) {
+        int nc = cJSON_IsArray(cands) ? cJSON_GetArraySize(cands) : 0;
+        if (nc > 0) {
+            /* Primary response from candidates[0] */
             cJSON *cand    = cJSON_GetArrayItem(cands, 0);
             cJSON *content = cJSON_GetObjectItemCaseSensitive(cand, "content");
             cJSON *parts   = cJSON_GetObjectItemCaseSensitive(content, "parts");
@@ -151,6 +155,28 @@ static ProviderReply *google_send(Provider *p, const ProviderRequest *req) {
                 cJSON *text = cJSON_GetObjectItemCaseSensitive(part, "text");
                 if (cJSON_IsString(text) && text->valuestring)
                     reply->content = strdup(text->valuestring);
+            }
+
+            /* Collect all candidates when nc > 1 */
+            if (nc > 1) {
+                reply->all_choices = calloc(nc, sizeof(char *));
+                if (reply->all_choices) {
+                    reply->n_choices = nc;
+                    for (int i = 0; i < nc; i++) {
+                        cJSON *cd  = cJSON_GetArrayItem(cands, i);
+                        cJSON *cnt = cJSON_GetObjectItemCaseSensitive(cd, "content");
+                        cJSON *pts = cJSON_GetObjectItemCaseSensitive(cnt, "parts");
+                        if (cJSON_IsArray(pts) && cJSON_GetArraySize(pts) > 0) {
+                            cJSON *pt = cJSON_GetArrayItem(pts, 0);
+                            cJSON *tx = cJSON_GetObjectItemCaseSensitive(pt, "text");
+                            reply->all_choices[i] = (cJSON_IsString(tx) && tx->valuestring)
+                                                    ? strdup(tx->valuestring)
+                                                    : strdup("");
+                        } else {
+                            reply->all_choices[i] = strdup("");
+                        }
+                    }
+                }
             }
         }
         cJSON_Delete(root);

@@ -52,6 +52,22 @@ typedef struct {
 static InFlight in_flight[MAX_IN_FLIGHT];
 static int      spin_tick = 0;           /* incremented every 100ms poll */
 
+/* --- Pending multi-choice picker --- */
+
+#define MAX_CHOICES 5
+
+typedef struct {
+    int   session_idx;
+    int   n;
+    char *choices[MAX_CHOICES];
+    int   selected;   /* 0-based highlighted choice */
+} PendingChoices;
+
+static PendingChoices *pending_choices = NULL;
+
+/* Forward declaration — defined after draw_layout in source order */
+static void draw_choice_picker(WINDOW *win, PendingChoices *pc);
+
 static void inflight_add(uint64_t corr_id, int sidx, const char *name) {
     for (int i = 0; i < MAX_IN_FLIGHT; i++) {
         if (!in_flight[i].active) {
@@ -136,6 +152,7 @@ static net_fd_t        ipc_fd        = NET_INVALID;
 static uint64_t        next_corr     = 1;
 static char            selected_model[64]    = "grok-3-fast";
 static char            selected_provider[32] = "xai";
+static int             selected_n_choices    = 1;
 
 /* --- Backend process management --- */
 
@@ -459,6 +476,10 @@ static void draw_layout(void) {
     if (cb) chat_render(cb, win_main);
     else { werase(win_main); wrefresh(win_main); }
 
+    /* Overlay choice picker on top of chat if pending for this session */
+    if (pending_choices && pending_choices->session_idx == sessions.active)
+        draw_choice_picker(win_main, pending_choices);
+
     /* Workers pane + Decisions pane */
     draw_workers();
 
@@ -481,6 +502,10 @@ static void draw_layout(void) {
     if (focus == 0) {
         mvwprintw(win_footer, 0, 2,
             "[↑↓] Select  [Enter/→] Open  [n] New  [Tab] To input");
+    } else if (pending_choices && pending_choices->session_idx == sessions.active) {
+        mvwprintw(win_footer, 0, 2,
+            "[1-%d] Pick  [↑↓] Highlight  [Enter] Accept  [Tab] Cancel",
+            pending_choices->n);
     } else if (input_line.len > 0 && input_line.buffer[0] == '/') {
         const char *hint = cmd_hint(input_line.buffer);
         if (hint) mvwprintw(win_footer, 0, 2, "%s", hint);
@@ -529,6 +554,69 @@ static void do_set_provider(const char *provider_id) {
         strncpy(selected_provider, provider_id, sizeof(selected_provider) - 1);
         selected_provider[sizeof(selected_provider) - 1] = '\0';
     }
+}
+
+static void do_set_n_choices(int n) {
+    if (n >= 1 && n <= MAX_CHOICES) selected_n_choices = n;
+}
+
+/* Accept one of the pending choices and add it as the assistant message. */
+static void accept_choice(int idx) {
+    if (!pending_choices || idx < 0 || idx >= pending_choices->n) return;
+    int sidx = pending_choices->session_idx;
+    if (sidx < 0 || sidx >= sm_count(&sessions)) return;
+    ChatBuffer *cb = &sessions.sessions[sidx].chat;
+    chat_add_r(cb, pending_choices->choices[idx], false, NULL);
+    cb->scroll = 0;
+    persist_save_session(&sessions, sidx);
+    for (int i = 0; i < pending_choices->n; i++)
+        free(pending_choices->choices[i]);
+    free(pending_choices);
+    pending_choices = NULL;
+}
+
+/* Draw choice picker overlay at the bottom of win_main. */
+static void draw_choice_picker(WINDOW *win, PendingChoices *pc) {
+    int rows, cols;
+    getmaxyx(win, rows, cols);
+    int n = pc->n;
+    int start_row = rows - n - 3;
+    if (start_row < 1) start_row = 1;
+
+    /* Separator line */
+    wattron(win, A_DIM);
+    wmove(win, start_row, 0);
+    whline(win, ACS_HLINE, cols);
+    mvwaddstr(win, start_row, 2, "[ Pick a response: 1-");
+    char nbuf[8]; snprintf(nbuf, sizeof(nbuf), "%d", n);
+    waddstr(win, nbuf);
+    waddstr(win, ", ↑↓, Enter ]");
+    wattroff(win, A_DIM);
+
+    for (int i = 0; i < n && (start_row + 1 + i) < rows - 1; i++) {
+        int row = start_row + 1 + i;
+        wmove(win, row, 0);
+        wclrtoeol(win);
+        if (i == pc->selected)
+            wattron(win, A_REVERSE);
+        /* Truncate choice preview to one line */
+        char preview[256] = {0};
+        const char *src = pc->choices[i] ? pc->choices[i] : "";
+        /* strip leading whitespace */
+        while (*src == '\n' || *src == ' ') src++;
+        int avail = cols - 6;
+        if (avail < 1) avail = 1;
+        int slen = (int)strlen(src);
+        /* take first line only */
+        const char *nl = strchr(src, '\n');
+        int take = nl ? (int)(nl - src) : slen;
+        if (take > avail) take = avail;
+        snprintf(preview, sizeof(preview), " [%d] %.*s", i + 1, take, src);
+        mvwaddnstr(win, row, 0, preview, cols);
+        if (i == pc->selected)
+            wattroff(win, A_REVERSE);
+    }
+    wrefresh(win);
 }
 
 /* --- IPC --- */
@@ -582,6 +670,42 @@ static void check_ipc(void) {
             free(reasoning);
         }
         draw_layout();
+    } else if (msg.type == MSG_REP_CHOICES && msg.payload) {
+        uint32_t sidx = 0;
+        char **choices = NULL;
+        int n = 0;
+        if (ipc_decode_rep_choices(msg.payload, msg.payload_len,
+                                    &sidx, &choices, &n) == 0 && n > 0) {
+            int real_sidx = inflight_remove(msg.corr_id);
+            if (real_sidx >= 0) sidx = (uint32_t)real_sidx;
+
+            ChatBuffer *cb = ((int)sidx < sm_count(&sessions))
+                ? &sessions.sessions[sidx].chat
+                : sm_active_chat(&sessions);
+            if (cb) chat_remove_last(cb);   /* remove "..." placeholder */
+
+            /* Free previous pending choices if any */
+            if (pending_choices) {
+                for (int i = 0; i < pending_choices->n; i++)
+                    free(pending_choices->choices[i]);
+                free(pending_choices);
+            }
+            pending_choices = calloc(1, sizeof(PendingChoices));
+            if (pending_choices) {
+                pending_choices->session_idx = (int)sidx;
+                pending_choices->n = n > MAX_CHOICES ? MAX_CHOICES : n;
+                for (int i = 0; i < pending_choices->n; i++)
+                    pending_choices->choices[i] = choices[i] ? choices[i] : strdup("");
+                pending_choices->selected = 0;
+            } else {
+                for (int i = 0; i < n; i++) free(choices[i]);
+            }
+            free(choices);
+        }
+        draw_layout();
+        /* Draw choice picker on top of chat */
+        if (pending_choices && pending_choices->session_idx == sessions.active)
+            draw_choice_picker(win_main, pending_choices);
     } else if (msg.type == MSG_REP_ERROR) {
         int sidx = inflight_remove(msg.corr_id);
         ChatBuffer *cb = (sidx >= 0 && sidx < sm_count(&sessions))
@@ -657,8 +781,10 @@ static void submit_message(void) {
             .save_session     = do_save,
             .set_model        = do_set_model,
             .set_provider     = do_set_provider,
+            .set_n_choices    = do_set_n_choices,
             .current_model    = selected_model,
             .current_provider = selected_provider,
+            .n_choices_val    = selected_n_choices,
         };
         cmd_dispatch(cmd_buf, &ctx);
         return;
@@ -688,6 +814,7 @@ static void submit_message(void) {
                                             msg_count, texts, is_user,
                                             selected_model,
                                             selected_provider,
+                                            selected_n_choices,
                                             &payload_len);
     free(texts);
     free(is_user);
@@ -792,9 +919,47 @@ int main(void) {
         } else { /* focus == 2: input */
             if (ch == 'q') break;
             if (ch == KEY_LEFT || ch == '\t') {
+                /* Cancel pending choices on focus change */
+                if (pending_choices) {
+                    for (int i = 0; i < pending_choices->n; i++)
+                        free(pending_choices->choices[i]);
+                    free(pending_choices);
+                    pending_choices = NULL;
+                }
                 focus = 0;
                 draw_layout();
                 continue;
+            }
+
+            /* --- Choice picker intercepts --- */
+            if (pending_choices &&
+                pending_choices->session_idx == sessions.active) {
+                /* Number keys 1–N: immediate selection */
+                if (ch >= '1' && ch < '1' + pending_choices->n) {
+                    accept_choice(ch - '1');
+                    draw_layout();
+                    continue;
+                }
+                /* Arrow keys move highlight */
+                if (ch == KEY_UP && pending_choices->selected > 0) {
+                    pending_choices->selected--;
+                    draw_layout();
+                    draw_choice_picker(win_main, pending_choices);
+                    continue;
+                }
+                if (ch == KEY_DOWN &&
+                    pending_choices->selected < pending_choices->n - 1) {
+                    pending_choices->selected++;
+                    draw_layout();
+                    draw_choice_picker(win_main, pending_choices);
+                    continue;
+                }
+                /* Enter (with empty input) confirms highlighted choice */
+                if ((ch == '\n' || ch == KEY_ENTER) && input_line.len == 0) {
+                    accept_choice(pending_choices->selected);
+                    draw_layout();
+                    continue;
+                }
             }
             if (ch == KEY_PPAGE) {
                 ChatBuffer *cb = sm_active_chat(&sessions);

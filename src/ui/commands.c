@@ -14,10 +14,11 @@ static const char *HELP_TEXT =
     "  /rename <name>   rename current session\n"
     "  /provider        choose AI provider\n"
     "  /model           choose model for current provider\n"
+    "  /choices [1-5]   request N alternative responses to pick from\n"
     "  /help            show this help";
 
 static const char *CMD_HINT =
-    "/new  /clear  /rename <name>  /provider  /model  /help";
+    "/new  /clear  /rename <name>  /provider  /model  /choices [1-5]  /help";
 
 const char *cmd_hint(const char *partial) {
     if (!partial || partial[0] != '/') return NULL;
@@ -156,6 +157,33 @@ int cmd_dispatch(const char *input, CmdCtx *ctx) {
             system_msg(sm, msg);
             ctx->draw();
         }
+        return 1;
+    }
+
+    /* /choices [N] — set number of response alternatives */
+    if (strncmp(input, "/choices", 8) == 0 &&
+        (input[8] == '\0' || input[8] == ' ')) {
+        const char *arg = (input[8] == ' ') ? input + 9 : NULL;
+        if (arg && *arg) {
+            int n = atoi(arg);
+            if (n >= 1 && n <= 5) {
+                if (ctx->set_n_choices) ctx->set_n_choices(n);
+                char msg[64];
+                snprintf(msg, sizeof(msg),
+                         n == 1 ? "Choices: 1 (single response)"
+                                : "Choices: %d — next reply will offer %d alternatives",
+                         n, n);
+                system_msg(sm, msg);
+            } else {
+                system_msg(sm, "Usage: /choices 1-5");
+            }
+        } else {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Choices: %d (use /choices 1-5 to change)",
+                     ctx->n_choices_val);
+            system_msg(sm, msg);
+        }
+        ctx->draw();
         return 1;
     }
 

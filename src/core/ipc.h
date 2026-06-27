@@ -17,6 +17,7 @@
  *   TUI  → backend : MSG_REQ_CANCEL      (cancel an in-flight corr_id)
  *   backend → TUI  : MSG_REP_FINAL       (complete reply + optional reasoning)
  *   backend → TUI  : MSG_REP_ERROR       (error string)
+ *   backend → TUI  : MSG_REP_CHOICES     (N candidate replies for user to pick)
  *   backend → TUI  : MSG_WORKER_START    (sub-worker began; corr_id=sub, payload has parent+desc)
  *   backend → TUI  : MSG_WORKER_END      (sub-worker done; corr_id=sub, no payload)
  */
@@ -26,6 +27,7 @@ typedef enum {
     MSG_REQ_CANCEL  = 2,
     MSG_REP_FINAL   = 10,
     MSG_REP_ERROR   = 11,
+    MSG_REP_CHOICES = 12,  /* backend→TUI: N candidate replies for user selection */
     MSG_WORKER_START = 20,
     MSG_WORKER_END   = 21,
     MSG_SESSION_RENAME = 22,  /* backend→TUI: suggested session topic */
@@ -52,7 +54,7 @@ int ipc_recv(net_fd_t fd, IpcMsg *msg);
 
 /* --- Payload helpers --- */
 
-/* Encode MSG_REQ_SEND payload. model and provider may be NULL.
+/* Encode MSG_REQ_SEND payload. model and provider may be NULL. n_choices >= 1.
  * Returns heap buffer, sets *out_len. */
 uint8_t *ipc_encode_req_send(uint32_t session_idx,
                               uint32_t msg_count,
@@ -60,6 +62,7 @@ uint8_t *ipc_encode_req_send(uint32_t session_idx,
                               const uint8_t     *is_user,
                               const char        *model,
                               const char        *provider,
+                              int                n_choices,
                               uint32_t          *out_len);
 
 /* Decode MSG_REQ_SEND payload. Returns 0 on success.
@@ -70,7 +73,8 @@ int ipc_decode_req_send(const uint8_t *buf, uint32_t buf_len,
                          char    ***texts,
                          uint8_t  **is_user,
                          char     **model,
-                         char     **provider);
+                         char     **provider,
+                         int       *n_choices);
 
 /* Encode MSG_REP_FINAL payload. reasoning may be NULL. */
 uint8_t *ipc_encode_rep_final(uint32_t    session_idx,
@@ -116,5 +120,22 @@ uint8_t *ipc_encode_session_rename(uint32_t session_idx,
 int ipc_decode_session_rename(const uint8_t *buf, uint32_t buf_len,
                                uint32_t *session_idx,
                                char    **topic);
+
+/* --- MSG_REP_CHOICES ---
+ * Payload: [u32 session_idx][u32 n][n × ([u32 len][text])]
+ * Sent instead of MSG_REP_FINAL when n_choices > 1.
+ * TUI presents numbered options; user picks one which becomes the message. */
+
+uint8_t *ipc_encode_rep_choices(uint32_t     session_idx,
+                                 const char **choices,
+                                 int          n,
+                                 uint32_t    *out_len);
+
+/* Decode MSG_REP_CHOICES payload. Returns 0 on success.
+ * Caller frees (*choices)[i] and *choices. */
+int ipc_decode_rep_choices(const uint8_t *buf, uint32_t buf_len,
+                            uint32_t *session_idx,
+                            char   ***choices,
+                            int      *n);
 
 #endif /* IPC_H */

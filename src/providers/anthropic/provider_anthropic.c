@@ -96,11 +96,11 @@ static int anthropic_init(Provider *p) {
     return 1;
 }
 
-static ProviderReply *anthropic_send(Provider *p, const ProviderRequest *req) {
-    AnthropicPriv *priv = (AnthropicPriv *)p->priv;
-    if (!priv || !priv->api_key) return NULL;
-
-    char *body = build_body(req->history, req->model);
+/* Single HTTP call → heap string (caller frees), or NULL on error. */
+static char *anthropic_call_once(AnthropicPriv *priv,
+                                  const ChatBuffer *history,
+                                  const char *model) {
+    char *body = build_body(history, model);
     if (!body) return NULL;
 
     CURL *curl = curl_easy_init();
@@ -129,24 +129,47 @@ static ProviderReply *anthropic_send(Provider *p, const ProviderRequest *req) {
     curl_easy_cleanup(curl);
     free(body);
 
-    if (res != CURLE_OK || http_code != 200 || !rb.data) {
-        free(rb.data);
-        return NULL;
+    char *result = NULL;
+    if (res == CURLE_OK && http_code == 200 && rb.data) {
+        cJSON *root = cJSON_Parse(rb.data);
+        if (root) {
+            cJSON *content = cJSON_GetObjectItemCaseSensitive(root, "content");
+            if (cJSON_IsArray(content) && cJSON_GetArraySize(content) > 0) {
+                cJSON *block = cJSON_GetArrayItem(content, 0);
+                cJSON *text  = cJSON_GetObjectItemCaseSensitive(block, "text");
+                if (cJSON_IsString(text) && text->valuestring)
+                    result = strdup(text->valuestring);
+            }
+            cJSON_Delete(root);
+        }
     }
+    free(rb.data);
+    return result;
+}
+
+static ProviderReply *anthropic_send(Provider *p, const ProviderRequest *req) {
+    AnthropicPriv *priv = (AnthropicPriv *)p->priv;
+    if (!priv || !priv->api_key) return NULL;
 
     ProviderReply *reply = calloc(1, sizeof(ProviderReply));
-    cJSON *root = cJSON_Parse(rb.data);
-    free(rb.data);
-    if (root) {
-        /* response: {"content": [{"type": "text", "text": "..."}]} */
-        cJSON *content = cJSON_GetObjectItemCaseSensitive(root, "content");
-        if (cJSON_IsArray(content) && cJSON_GetArraySize(content) > 0) {
-            cJSON *block = cJSON_GetArrayItem(content, 0);
-            cJSON *text  = cJSON_GetObjectItemCaseSensitive(block, "text");
-            if (cJSON_IsString(text) && text->valuestring)
-                reply->content = strdup(text->valuestring);
+    if (!reply) return NULL;
+
+    int nc = (req->n_choices > 1) ? req->n_choices : 1;
+
+    if (nc == 1) {
+        /* Single call — existing behaviour */
+        reply->content = anthropic_call_once(priv, req->history, req->model);
+    } else {
+        /* Anthropic has no native n>1; make N sequential calls */
+        reply->all_choices = calloc(nc, sizeof(char *));
+        if (!reply->all_choices) { free(reply); return NULL; }
+        reply->n_choices = nc;
+        for (int i = 0; i < nc; i++) {
+            reply->all_choices[i] = anthropic_call_once(priv, req->history, req->model);
+            if (!reply->all_choices[i]) reply->all_choices[i] = strdup("");
         }
-        cJSON_Delete(root);
+        reply->content = reply->all_choices[0]
+                         ? strdup(reply->all_choices[0]) : NULL;
     }
     return reply;
 }

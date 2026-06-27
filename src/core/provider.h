@@ -4,16 +4,19 @@
 #include "chat.h"
 
 typedef struct {
-    char      *content;
-    char      *reasoning;
+    char      *content;      /* always set (= all_choices[0] when n_choices > 1) */
+    char      *reasoning;    /* may be NULL */
     ToolCall  *tool_calls;
     int        n_tool_calls;
+    char     **all_choices;  /* NULL when n_choices == 1; else heap array [0..n_choices-1] */
+    int        n_choices;    /* 1 = single response (default) */
 } ProviderReply;
 
 typedef struct {
     const ChatBuffer *history;
     const char       *model;
     int               enable_tools;
+    int               n_choices;  /* 1 = single (default), 2-5 = request multiple candidates */
 } ProviderRequest;
 
 typedef struct Provider {

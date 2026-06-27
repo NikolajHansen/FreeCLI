@@ -34,3 +34,7 @@ ltmain.sh
 # Misc
 .DS_Store
 *.bak
+.dirstamp
+src/freecli
+src/freecli-backend
+src/freecli_backend
