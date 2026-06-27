@@ -10,6 +10,7 @@ typedef struct {
     int            *focus;
     void          (*draw)(void);
     void          (*save_session)(const SessionManager *sm, int idx);
+    void          (*delete_session)(int idx);   /* delete session by index */
     void          (*set_model)(const char *model);
     void          (*set_provider)(const char *provider_id);
     void          (*set_n_choices)(int n);

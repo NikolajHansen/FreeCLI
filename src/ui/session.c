@@ -36,6 +36,23 @@ void sm_select(SessionManager *sm, int index) {
 
 int sm_count(SessionManager *sm) { return sm->count; }
 
+int sm_remove(SessionManager *sm, int index) {
+    if (index < 0 || index >= sm->count) return sm->active;
+    chat_free(&sm->sessions[index].chat);
+    /* shift remaining sessions down */
+    for (int i = index; i < sm->count - 1; i++)
+        sm->sessions[i] = sm->sessions[i + 1];
+    sm->count--;
+    /* keep active index valid */
+    if (sm->count == 0) {
+        sm->active = -1;
+        return -1;
+    }
+    if (sm->active > index)      sm->active--;
+    else if (sm->active == index) sm->active = (index < sm->count) ? index : sm->count - 1;
+    return sm->active;
+}
+
 Session *sm_get(SessionManager *sm, int index) {
     if (index < 0 || index >= sm->count) return NULL;
     return &sm->sessions[index];

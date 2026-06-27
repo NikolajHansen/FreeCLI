@@ -10,6 +10,7 @@
 static const char *HELP_TEXT =
     "Available commands:\n"
     "  /new [name]      create a new chat session\n"
+    "  /delete          delete the current session\n"
     "  /clear           clear current session messages\n"
     "  /rename <name>   rename current session\n"
     "  /provider        choose AI provider\n"
@@ -18,7 +19,7 @@ static const char *HELP_TEXT =
     "  /help            show this help";
 
 static const char *CMD_HINT =
-    "/new  /clear  /rename <name>  /provider  /model  /choices [1-5]  /help";
+    "/new  /delete  /clear  /rename <name>  /provider  /model  /choices [1-5]  /help";
 
 const char *cmd_hint(const char *partial) {
     if (!partial || partial[0] != '/') return NULL;
@@ -38,6 +39,15 @@ int cmd_dispatch(const char *input, CmdCtx *ctx) {
     if (strncmp(input, "/help", 5) == 0 &&
         (input[5] == '\0' || input[5] == ' ')) {
         system_msg(sm, HELP_TEXT);
+        ctx->draw();
+        return 1;
+    }
+
+    /* /delete — delete current session */
+    if (strncmp(input, "/delete", 7) == 0 &&
+        (input[7] == '\0' || input[7] == ' ')) {
+        if (ctx->delete_session)
+            ctx->delete_session(sm->active);
         ctx->draw();
         return 1;
     }

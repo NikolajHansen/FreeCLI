@@ -379,7 +379,7 @@ static void draw_sidebar(void) {
         mvwprintw(win_sidebar, i + 2, 1, "%-17s", buf);
         wattroff(win_sidebar, A_REVERSE | A_BOLD);
     }
-    mvwprintw(win_sidebar, getmaxy(win_sidebar)-1, 1, "[n] New");
+    mvwprintw(win_sidebar, getmaxy(win_sidebar)-1, 1, "[n]ew [d]el");
     box(win_sidebar, 0, 0);
     wrefresh(win_sidebar);
 }
@@ -546,6 +546,20 @@ static void do_draw(void) { draw_layout(); }
 static void do_save(const SessionManager *sm, int idx) {
     if (idx == -1) persist_save_all(sm);
     else           persist_save_session(sm, idx);
+}
+
+static void do_delete_session(int idx) {
+    if (idx < 0 || idx >= sm_count(&sessions)) return;
+    int del_id = sessions.sessions[idx].id;
+    int new_active = sm_remove(&sessions, idx);
+    persist_delete_session(del_id);
+    if (sm_count(&sessions) == 0)
+        sm_new_session(&sessions, "Chat 1");
+    if (sidebar_sel >= sm_count(&sessions))
+        sidebar_sel = sm_count(&sessions) - 1;
+    if (new_active >= 0) sm_select(&sessions, new_active);
+    else                 sm_select(&sessions, sidebar_sel);
+    persist_save_all(&sessions);
 }
 
 static void do_set_model(const char *model) {
@@ -981,6 +995,7 @@ static void submit_message(void) {
             .focus            = &focus,
             .draw             = do_draw,
             .save_session     = do_save,
+            .delete_session   = do_delete_session,
             .set_model        = do_set_model,
             .set_provider     = do_set_provider,
             .set_n_choices    = do_set_n_choices,
@@ -1101,9 +1116,15 @@ int main(void) {
 
         if (ch == ERR) { check_ipc(); continue; }
         if (ch == KEY_RESIZE) { handle_resize(); continue; }
-        if (ch == 'n') { new_session(); continue; }
 
         if (focus == 0) {
+            if (ch == 'n') { new_session(); continue; }
+            if (ch == 'q') break;
+            if (ch == 'd' && sm_count(&sessions) > 0) {
+                do_delete_session(sidebar_sel);
+                draw_layout();
+                continue;
+            }
             if (ch == KEY_UP && sidebar_sel > 0) {
                 sidebar_sel--;
                 draw_sidebar();
@@ -1128,7 +1149,6 @@ int main(void) {
                 draw_layout();
             }
         } else { /* focus == 2: input */
-            if (ch == 'q') break;
             if (ch == KEY_LEFT || ch == '\t') {
                 /* Cancel pending choices on focus change */
                 if (pending_choices) {
