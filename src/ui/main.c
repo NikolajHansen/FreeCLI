@@ -54,13 +54,19 @@ static int      spin_tick = 0;           /* incremented every 100ms poll */
 
 /* --- Pending multi-choice picker --- */
 
-#define MAX_CHOICES 5
+#define MAX_CHOICES 8
+
+typedef enum {
+    CHOICES_DRAFT  = 0,  /* N parallel drafts — selected becomes assistant message */
+    CHOICES_OPTION = 1,  /* LLM-offered options — selected becomes next user message */
+} ChoicesMode;
 
 typedef struct {
-    int   session_idx;
-    int   n;
-    char *choices[MAX_CHOICES];
-    int   selected;   /* 0-based highlighted choice */
+    int         session_idx;
+    int         n;
+    char       *choices[MAX_CHOICES];
+    int         selected;   /* 0-based highlighted choice */
+    ChoicesMode mode;
 } PendingChoices;
 
 static PendingChoices *pending_choices = NULL;
@@ -560,19 +566,153 @@ static void do_set_n_choices(int n) {
     if (n >= 1 && n <= MAX_CHOICES) selected_n_choices = n;
 }
 
-/* Accept one of the pending choices and add it as the assistant message. */
+/*
+ * Scan text for a numbered or lettered choice list (e.g. "1. ...\n2. ...\n3. ...").
+ * Returns number of choices found (0 if none / fewer than 2).
+ * Populates pc->choices[] and pc->n on success.
+ * pc must be zero-initialised by caller.
+ */
+static int detect_choices(const char *text, PendingChoices *pc) {
+    if (!text) return 0;
+    pc->n = 0;
+
+    const char *p = text;
+    int expected = 1;          /* next integer bullet expected */
+    int use_letters = 0;       /* 0 = numeric, 1 = A/B/C... */
+
+    /* Two-pass: try numeric first, then letter-based */
+    for (int pass = 0; pass < 2 && pc->n < 2; pass++) {
+        pc->n = 0;
+        for (int i = 0; i < pc->n; i++) { free(pc->choices[i]); pc->choices[i] = NULL; }
+        expected = pass == 0 ? 1 : 0; /* 0 = 'A' */
+        use_letters = pass;
+
+        const char *scan = text;
+        while (*scan && pc->n < MAX_CHOICES) {
+            /* find start of a line */
+            const char *line = scan;
+            while (*line == '\r') line++;
+
+            /* skip leading spaces */
+            const char *t = line;
+            while (*t == ' ' || *t == '\t') t++;
+
+            int matched = 0;
+            const char *item_start = NULL;
+
+            if (!use_letters) {
+                /* try "N. " or "N) " where N == expected */
+                int num = 0;
+                const char *q = t;
+                while (*q >= '0' && *q <= '9') { num = num * 10 + (*q - '0'); q++; }
+                if (num == expected && q > t &&
+                    (*q == '.' || *q == ')') &&
+                    (q[1] == ' ' || q[1] == '\t')) {
+                    item_start = q + 2;
+                    while (*item_start == ' ') item_start++;
+                    matched = 1;
+                }
+            } else {
+                /* try "A. " or "A) " (case-insensitive, expected offset from 'A') */
+                char want = (char)('A' + expected);
+                if ((*t == want || *t == want + 32) &&
+                    (t[1] == '.' || t[1] == ')') &&
+                    (t[2] == ' ' || t[2] == '\t')) {
+                    item_start = t + 3;
+                    while (*item_start == ' ') item_start++;
+                    matched = 1;
+                }
+            }
+
+            if (matched && item_start) {
+                /* read to end of this item (until next numbered bullet or blank line) */
+                const char *end = item_start;
+                while (*end) {
+                    /* peek at next line for a new bullet */
+                    if (*end == '\n') {
+                        const char *next = end + 1;
+                        while (*next == ' ' || *next == '\t') next++;
+                        /* stop if empty line or next bullet starts */
+                        if (*next == '\n' || *next == '\r' || *next == '\0') break;
+                        int is_bullet = 0;
+                        if (!use_letters) {
+                            int nn = 0; const char *q2 = next;
+                            while (*q2 >= '0' && *q2 <= '9') { nn = nn * 10 + (*q2 - '0'); q2++; }
+                            if (nn == expected + 1 && q2 > next && (*q2 == '.' || *q2 == ')'))
+                                is_bullet = 1;
+                        } else {
+                            char nw = (char)('A' + expected + 1);
+                            if ((*next == nw || *next == nw + 32) &&
+                                (next[1] == '.' || next[1] == ')'))
+                                is_bullet = 1;
+                        }
+                        if (is_bullet) break;
+                    }
+                    end++;
+                }
+                /* trim trailing whitespace */
+                while (end > item_start && (end[-1] == '\n' || end[-1] == ' ' || end[-1] == '\r'))
+                    end--;
+                int len = (int)(end - item_start);
+                if (len > 0) {
+                    pc->choices[pc->n] = malloc(len + 1);
+                    if (pc->choices[pc->n]) {
+                        memcpy(pc->choices[pc->n], item_start, len);
+                        pc->choices[pc->n][len] = '\0';
+                        pc->n++;
+                        expected++;
+                    }
+                }
+                scan = end;
+            } else {
+                /* not a matching bullet — skip to end of line */
+                while (*scan && *scan != '\n') scan++;
+                if (*scan == '\n') scan++;
+            }
+        }
+    }
+
+    if (pc->n < 2) {
+        for (int i = 0; i < pc->n; i++) { free(pc->choices[i]); pc->choices[i] = NULL; }
+        pc->n = 0;
+        return 0;
+    }
+    return pc->n;
+}
+
+/* Submit an arbitrary text string as the next user message. */
+static void submit_text(const char *text);   /* forward decl */
+
+/* Accept one of the pending choices. */
 static void accept_choice(int idx) {
     if (!pending_choices || idx < 0 || idx >= pending_choices->n) return;
     int sidx = pending_choices->session_idx;
     if (sidx < 0 || sidx >= sm_count(&sessions)) return;
-    ChatBuffer *cb = &sessions.sessions[sidx].chat;
-    chat_add_r(cb, pending_choices->choices[idx], false, NULL);
-    cb->scroll = 0;
-    persist_save_session(&sessions, sidx);
+
+    char *chosen = pending_choices->choices[idx]
+                   ? strdup(pending_choices->choices[idx]) : NULL;
+    ChoicesMode mode = pending_choices->mode;
+
     for (int i = 0; i < pending_choices->n; i++)
         free(pending_choices->choices[i]);
     free(pending_choices);
     pending_choices = NULL;
+
+    if (!chosen) return;
+
+    if (mode == CHOICES_DRAFT) {
+        /* Draft picker: chosen text becomes the accepted assistant reply */
+        ChatBuffer *cb = &sessions.sessions[sidx].chat;
+        chat_add_r(cb, chosen, false, NULL);
+        cb->scroll = 0;
+        persist_save_session(&sessions, sidx);
+    } else {
+        /* Option picker: chosen text becomes the next user message */
+        sm_select(&sessions, sidx);
+        sessions.active = sidx;
+        submit_text(chosen);
+    }
+    free(chosen);
 }
 
 /* Draw choice picker overlay at the bottom of win_main. */
@@ -587,10 +727,10 @@ static void draw_choice_picker(WINDOW *win, PendingChoices *pc) {
     wattron(win, A_DIM);
     wmove(win, start_row, 0);
     whline(win, ACS_HLINE, cols);
-    mvwaddstr(win, start_row, 2, "[ Pick a response: 1-");
-    char nbuf[8]; snprintf(nbuf, sizeof(nbuf), "%d", n);
-    waddstr(win, nbuf);
-    waddstr(win, ", ↑↓, Enter ]");
+    const char *action = (pc->mode == CHOICES_OPTION) ? "Select option" : "Pick response";
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "[ %s: 1-%d  ↑↓  Enter ]", action, n);
+    mvwaddstr(win, start_row, 2, hdr);
     wattroff(win, A_DIM);
 
     for (int i = 0; i < n && (start_row + 1 + i) < rows - 1; i++) {
@@ -665,6 +805,25 @@ static void check_ipc(void) {
                            false, reasoning);
                 cb->scroll = 0;
                 persist_save_session(&sessions, (int)sidx);
+
+                /* Auto-detect numbered/lettered option lists in the reply */
+                const char *reply_text = cb->msgs[cb->count - 1].text;
+                if (reply_text && !pending_choices) {
+                    PendingChoices *pc = calloc(1, sizeof(PendingChoices));
+                    if (pc && detect_choices(reply_text, pc) >= 2) {
+                        pc->session_idx = (int)sidx;
+                        pc->selected    = 0;
+                        pc->mode        = CHOICES_OPTION;
+                        if (pending_choices) {
+                            for (int i = 0; i < pending_choices->n; i++)
+                                free(pending_choices->choices[i]);
+                            free(pending_choices);
+                        }
+                        pending_choices = pc;
+                    } else {
+                        free(pc);
+                    }
+                }
             }
             free(content);
             free(reasoning);
@@ -694,6 +853,7 @@ static void check_ipc(void) {
             if (pending_choices) {
                 pending_choices->session_idx = (int)sidx;
                 pending_choices->n = n > MAX_CHOICES ? MAX_CHOICES : n;
+                pending_choices->mode = CHOICES_DRAFT;
                 for (int i = 0; i < pending_choices->n; i++)
                     pending_choices->choices[i] = choices[i] ? choices[i] : strdup("");
                 pending_choices->selected = 0;
@@ -763,6 +923,48 @@ static void check_ipc(void) {
     free(msg.payload);
 }
 
+/*
+ * Core send logic — adds text as user message and dispatches to backend.
+ * Used by both submit_message (from input bar) and accept_choice (option mode).
+ */
+static void submit_text(const char *text) {
+    if (!text || !*text) return;
+    ChatBuffer *cb = sm_active_chat(&sessions);
+    if (!cb) return;
+    if (ipc_fd == NET_INVALID) return;
+    if (inflight_session_active(sessions.active)) return;
+
+    chat_add(cb, text, true);
+    chat_add(cb, "...", false);
+    draw_layout();
+
+    uint32_t msg_count = (uint32_t)(cb->count - 1);
+    const char **texts   = malloc(msg_count * sizeof(char *));
+    uint8_t     *is_user = malloc(msg_count);
+    for (uint32_t i = 0; i < msg_count; i++) {
+        texts[i]   = cb->msgs[i].text;
+        is_user[i] = (uint8_t)cb->msgs[i].is_user;
+    }
+
+    uint32_t payload_len;
+    uint8_t *payload = ipc_encode_req_send((uint32_t)sessions.active,
+                                            msg_count, texts, is_user,
+                                            selected_model,
+                                            selected_provider,
+                                            1,   /* n_choices always 1 for option replies */
+                                            &payload_len);
+    free(texts);
+    free(is_user);
+
+    if (payload) {
+        uint64_t corr = next_corr++;
+        Session *s = sm_active_session(&sessions);
+        inflight_add(corr, sessions.active, s ? s->name : "?");
+        ipc_send(ipc_fd, MSG_REQ_SEND, corr, payload, payload_len);
+        free(payload);
+    }
+}
+
 static void submit_message(void) {
     ChatBuffer *cb = sm_active_chat(&sessions);
     if (!cb || input_line.len == 0) return;
@@ -790,17 +992,26 @@ static void submit_message(void) {
         return;
     }
 
-    if (ipc_fd == NET_INVALID) return;
+    /* Dismiss any pending option picker — user typed instead of selecting */
+    if (pending_choices && pending_choices->mode == CHOICES_OPTION) {
+        for (int i = 0; i < pending_choices->n; i++)
+            free(pending_choices->choices[i]);
+        free(pending_choices);
+        pending_choices = NULL;
+    }
 
-    /* Don't allow a second concurrent request for the *same* session */
+    char text[sizeof(input_line.buffer)];
+    strncpy(text, input_line.buffer, sizeof(text) - 1);
+    text[sizeof(text) - 1] = '\0';
+    input_reset(&input_line);
+
+    if (ipc_fd == NET_INVALID) return;
     if (inflight_session_active(sessions.active)) return;
 
-    chat_add(cb, input_line.buffer, true);
-    input_reset(&input_line);
+    chat_add(cb, text, true);
     chat_add(cb, "...", false);
     draw_layout();
 
-    /* Build serialisation arrays from current history (exclude "..." placeholder) */
     uint32_t msg_count = (uint32_t)(cb->count - 1);
     const char **texts   = malloc(msg_count * sizeof(char *));
     uint8_t     *is_user = malloc(msg_count);
