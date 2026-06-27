@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+echo "Bootstrapping FreeCLI build system..."
+
+# Create m4 directory if it doesn't exist
+mkdir -p m4
+
+# Run autotools
+aclocal -I m4
+autoconf
+automake --add-missing --copy --foreign
+
+echo "Bootstrap complete. Run ./configure && make"
