@@ -22,6 +22,7 @@
 # include <sys/wait.h>
 # include <libgen.h>
 # include <time.h>
+# include <pwd.h>
 # if defined(__APPLE__)
 #   include <mach-o/dyld.h>
 # elif defined(__FreeBSD__) || defined(__DragonFly__)
@@ -159,6 +160,7 @@ static uint64_t        next_corr     = 1;
 static char            selected_model[64]    = "grok-3-fast";
 static char            selected_provider[32] = "xai";
 static int             selected_n_choices    = 1;
+static char            userhost[128]         = "user@host";
 
 /* --- Backend process management --- */
 
@@ -457,7 +459,7 @@ static void draw_layout(void) {
     wbkgd(win_title, COLOR_PAIR(COLOR_PAIR_TITLE));
     werase(win_title);
     mvwprintw(win_title, 0, 2, " FreeCLI v0.1 ");
-    mvwprintw(win_title, 0, COLS - 20, " [user@host] ");
+    mvwprintw(win_title, 0, COLS - (int)strlen(userhost) - 3, " %s ", userhost);
     wrefresh(win_title);
 
     wbkgd(win_status, COLOR_PAIR(COLOR_PAIR_STATUS));
@@ -1070,6 +1072,31 @@ static void new_session(void) {
 /* --- Main --- */
 
 int main(void) {
+#ifndef _WIN32
+    if (getuid() == 0) {
+        fprintf(stderr, "FreeCLI: refusing to run as root. "
+                        "Do not use sudo with freecli.\n");
+        return 1;
+    }
+    /* Resolve user@host once */
+    {
+        const char *user = NULL;
+        struct passwd *pw = getpwuid(getuid());
+        if (pw && pw->pw_name) user = pw->pw_name;
+        if (!user) user = getenv("USER");
+        if (!user) user = getenv("LOGNAME");
+        if (!user) user = "?";
+
+        char host[64] = "?";
+        gethostname(host, sizeof(host));
+        host[sizeof(host) - 1] = '\0';
+        /* Strip domain suffix */
+        char *dot = strchr(host, '.');
+        if (dot) *dot = '\0';
+
+        snprintf(userhost, sizeof(userhost), "%s@%s", user, host);
+    }
+#endif
     setlocale(LC_ALL, "");
     setlocale(LC_NUMERIC, "C");
 
