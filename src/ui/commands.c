@@ -3,6 +3,7 @@
 #include "provider.h"
 #include "provider_registry.h"
 #include "chat.h"
+#include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,10 +16,15 @@ static const char *HELP_TEXT =
     "  /rename <name>   rename current session\n"
     "  /provider        choose AI provider\n"
     "  /model           choose model for current provider\n"
+    "  /fs list [path]           list sandbox directory\n"
+    "  /fs read <path>           read a file from the sandbox\n"
+    "  /fs delete <path>         delete a file (requires approval)\n"
+    "  /fs create <path> [text]  create a file (requires approval)\n"
+    "  /fs write <path> [text]   overwrite a file (requires approval)\n"
     "  /help            show this help";
 
 static const char *CMD_HINT =
-    "/new  /delete  /clear  /rename <name>  /provider  /model  /help";
+    "/new  /delete  /clear  /rename  /provider  /model  /fs  /help";
 
 const char *cmd_hint(const char *partial) {
     if (!partial || partial[0] != '/') return NULL;
@@ -166,6 +172,111 @@ int cmd_dispatch(const char *input, CmdCtx *ctx) {
             system_msg(sm, msg);
             ctx->draw();
         }
+        return 1;
+    }
+
+    /* /fs <op> [path] [content...]
+     *
+     * Sends a MSG_WORKER_REQ to the filesystem worker.
+     * All paths are relative to the sandbox root.
+     *
+     * Ops:
+     *   /fs list [path]           — list directory (default: root)
+     *   /fs read <path>           — read file contents
+     *   /fs delete <path>         — delete file (requires Y/N approval)
+     *   /fs create <path> [text]  — create file (requires Y/N approval)
+     *   /fs write  <path> [text]  — overwrite file (requires Y/N approval)
+     */
+    if (strncmp(input, "/fs", 3) == 0 &&
+        (input[3] == '\0' || input[3] == ' ')) {
+
+        if (!ctx->send_worker_req) {
+            system_msg(sm, "[fs] worker not available");
+            ctx->draw();
+            return 1;
+        }
+
+        /* Parse: /fs <op> [rest] */
+        const char *rest = input + 3;
+        while (*rest == ' ') rest++;
+
+        if (*rest == '\0') {
+            system_msg(sm, "/fs: missing operation  (list|read|delete|create|write)");
+            ctx->draw();
+            return 1;
+        }
+
+        /* Extract op token */
+        char op_name[32];
+        const char *after_op = rest;
+        int op_len = 0;
+        while (*after_op && *after_op != ' ') { after_op++; op_len++; }
+        if (op_len >= (int)sizeof(op_name)) op_len = (int)sizeof(op_name) - 1;
+        memcpy(op_name, rest, (size_t)op_len);
+        op_name[op_len] = '\0';
+
+        /* Skip space after op */
+        while (*after_op == ' ') after_op++;
+
+        /* Map to backend op name */
+        const char *backend_op = NULL;
+        if      (strcmp(op_name, "list")   == 0) backend_op = "list_dir";
+        else if (strcmp(op_name, "read")   == 0) backend_op = "read_file";
+        else if (strcmp(op_name, "delete") == 0) backend_op = "delete_file";
+        else if (strcmp(op_name, "create") == 0) backend_op = "create_file";
+        else if (strcmp(op_name, "write")  == 0) backend_op = "modify_file";
+
+        if (!backend_op) {
+            char errbuf[96];
+            snprintf(errbuf, sizeof(errbuf),
+                     "/fs: unknown op '%s'  (list|read|delete|create|write)", op_name);
+            system_msg(sm, errbuf);
+            ctx->draw();
+            return 1;
+        }
+
+        /* Extract path (first word after op) */
+        char path[1024] = "";
+        const char *after_path = after_op;
+        if (*after_op) {
+            int plen = 0;
+            while (after_path[plen] && after_path[plen] != ' ') plen++;
+            if (plen >= (int)sizeof(path)) plen = (int)sizeof(path) - 1;
+            memcpy(path, after_op, (size_t)plen);
+            path[plen] = '\0';
+            after_path += plen;
+            while (*after_path == ' ') after_path++;
+        }
+
+        /* Build JSON args */
+        cJSON *args = cJSON_CreateObject();
+        cJSON_AddStringToObject(args, "path", path);
+
+        /* content: rest of line after path (for create/write) */
+        if ((strcmp(backend_op, "create_file") == 0 ||
+             strcmp(backend_op, "modify_file")  == 0) && *after_path) {
+            cJSON_AddStringToObject(args, "content", after_path);
+        } else if (strcmp(backend_op, "create_file") == 0 ||
+                   strcmp(backend_op, "modify_file")  == 0) {
+            cJSON_AddStringToObject(args, "content", "");
+        }
+
+        char *args_json = cJSON_PrintUnformatted(args);
+        cJSON_Delete(args);
+
+        /* BACKEND_TYPE_FILESYSTEM == 4 */
+        uint64_t corr = ctx->send_worker_req(4, backend_op, args_json);
+        free(args_json);
+
+        if (corr == 0) {
+            system_msg(sm, "[fs] failed to send request to backend");
+        } else {
+            char pending_msg[128];
+            snprintf(pending_msg, sizeof(pending_msg),
+                     "[fs] %s %s — waiting…", op_name, path);
+            system_msg(sm, pending_msg);
+        }
+        ctx->draw();
         return 1;
     }
 

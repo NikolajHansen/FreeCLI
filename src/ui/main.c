@@ -581,6 +581,23 @@ static void do_set_provider(const char *provider_id) {
     }
 }
 
+static uint64_t do_send_worker_req(uint32_t worker_type,
+                                    const char *op,
+                                    const char *args_json) {
+    if (ipc_fd == NET_INVALID) return 0;
+
+    uint32_t payload_len;
+    uint8_t *payload = ipc_encode_worker_req(worker_type, op, args_json,
+                                              &payload_len);
+    if (!payload) return 0;
+
+    uint64_t corr = next_corr++;
+    inflight_add(corr, sessions.active, op ? op : "worker");
+    ipc_send(ipc_fd, MSG_WORKER_REQ, corr, payload, payload_len);
+    free(payload);
+    return corr;
+}
+
 /*
  * Scan text for a numbered or lettered choice list.
  * Returns number of choices found (0 if none / fewer than 2).
@@ -983,6 +1000,7 @@ static void submit_message(void) {
             .set_provider     = do_set_provider,
             .current_model    = selected_model,
             .current_provider = selected_provider,
+            .send_worker_req  = do_send_worker_req,
         };
         cmd_dispatch(cmd_buf, &ctx);
         return;
