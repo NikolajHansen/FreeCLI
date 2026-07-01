@@ -22,13 +22,18 @@
  */
 
 typedef enum {
-    MSG_REQ_SEND    = 1,
-    MSG_REQ_CANCEL  = 2,
-    MSG_REP_FINAL   = 10,
-    MSG_REP_ERROR   = 11,
+    MSG_REQ_SEND     = 1,
+    MSG_REQ_CANCEL   = 2,
+    MSG_REP_FINAL    = 10,
+    MSG_REP_ERROR    = 11,
     MSG_WORKER_START = 20,
     MSG_WORKER_END   = 21,
     MSG_SESSION_RENAME = 22,
+    /* --- Backend worker operations --- */
+    MSG_WORKER_REQ   = 30,  /* TUI → backend : invoke a worker operation  */
+    MSG_WORKER_REP   = 31,  /* backend → TUI : worker operation result     */
+    MSG_APPROVAL_REQ = 40,  /* backend → TUI : request explicit approval   */
+    MSG_APPROVAL_REP = 41,  /* TUI → backend : user's approval decision    */
 } MsgType;
 
 typedef struct {
@@ -114,5 +119,52 @@ uint8_t *ipc_encode_session_rename(uint32_t session_idx,
 int ipc_decode_session_rename(const uint8_t *buf, uint32_t buf_len,
                                uint32_t *session_idx,
                                char    **topic);
+
+/* --- MSG_WORKER_REQ ---
+ * Payload: [u32 worker_type][u32 op_len][op][u32 args_len][args_json]
+ * corr_id in IPC header identifies this request throughout its lifetime. */
+
+uint8_t *ipc_encode_worker_req(uint32_t    worker_type,
+                                const char *op,
+                                const char *args_json,   /* may be NULL */
+                                uint32_t   *out_len);
+
+int ipc_decode_worker_req(const uint8_t *buf, uint32_t buf_len,
+                           uint32_t *worker_type,
+                           char    **op,
+                           char    **args_json);  /* caller frees both */
+
+/* --- MSG_WORKER_REP ---
+ * Payload: [u8 success][u32 result_len][result_json_or_error_string] */
+
+uint8_t *ipc_encode_worker_rep(int         success,
+                                const char *result,
+                                uint32_t   *out_len);
+
+int ipc_decode_worker_rep(const uint8_t *buf, uint32_t buf_len,
+                           int  *success,
+                           char **result);  /* caller frees */
+
+/* --- MSG_APPROVAL_REQ ---
+ * Payload: [u64 req_corr_id][u32 desc_len][description]
+ * req_corr_id echoes the corr_id of the blocked worker request so the TUI
+ * can match it when the user responds. */
+
+uint8_t *ipc_encode_approval_req(uint64_t    req_corr_id,
+                                  const char *description,
+                                  uint32_t   *out_len);
+
+int ipc_decode_approval_req(const uint8_t *buf, uint32_t buf_len,
+                             uint64_t *req_corr_id,
+                             char    **description);  /* caller frees */
+
+/* --- MSG_APPROVAL_REP ---
+ * Payload: [u64 req_corr_id][u8 approved]  (approved: 1=yes, 0=no) */
+
+uint8_t *ipc_encode_approval_rep(uint64_t req_corr_id, int approved,
+                                  uint32_t *out_len);
+
+int ipc_decode_approval_rep(const uint8_t *buf, uint32_t buf_len,
+                             uint64_t *req_corr_id, int *approved);
 
 #endif /* IPC_H */

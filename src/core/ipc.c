@@ -286,3 +286,152 @@ int ipc_decode_session_rename(const uint8_t *buf, uint32_t buf_len,
     }
     return 0;
 }
+
+/* -------------------------------------------------------------------------
+ * MSG_WORKER_REQ
+ * Payload: [u32 worker_type][u32 op_len][op][u32 args_len][args_json]
+ * ------------------------------------------------------------------------- */
+
+uint8_t *ipc_encode_worker_req(uint32_t    worker_type,
+                                const char *op,
+                                const char *args_json,
+                                uint32_t   *out_len) {
+    uint32_t op_len   = op        ? (uint32_t)strlen(op)        : 0;
+    uint32_t args_len = args_json ? (uint32_t)strlen(args_json) : 0;
+    uint32_t sz = sizeof(uint32_t) * 3 + op_len + args_len;
+    uint8_t *buf = malloc(sz);
+    if (!buf) return NULL;
+    uint8_t *p = buf;
+    memcpy(p, &worker_type, sizeof(uint32_t)); p += sizeof(uint32_t);
+    memcpy(p, &op_len,      sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (op_len) { memcpy(p, op, op_len); p += op_len; }
+    memcpy(p, &args_len,    sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (args_len) memcpy(p, args_json, args_len);
+    *out_len = sz;
+    return buf;
+}
+
+int ipc_decode_worker_req(const uint8_t *buf, uint32_t buf_len,
+                           uint32_t *worker_type,
+                           char    **op,
+                           char    **args_json) {
+    *op = *args_json = NULL;
+    if (buf_len < 12) return -1;
+    const uint8_t *p   = buf;
+    const uint8_t *end = buf + buf_len;
+
+    memcpy(worker_type, p, sizeof(uint32_t)); p += sizeof(uint32_t);
+
+    uint32_t op_len;
+    memcpy(&op_len, p, sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (p + op_len > end) return -1;
+    *op = malloc(op_len + 1);
+    if (!*op) return -1;
+    memcpy(*op, p, op_len); (*op)[op_len] = '\0'; p += op_len;
+
+    if (p + sizeof(uint32_t) > end) return -1;
+    uint32_t args_len;
+    memcpy(&args_len, p, sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (args_len > 0) {
+        if (p + args_len > end) { free(*op); *op = NULL; return -1; }
+        *args_json = malloc(args_len + 1);
+        if (!*args_json) { free(*op); *op = NULL; return -1; }
+        memcpy(*args_json, p, args_len); (*args_json)[args_len] = '\0';
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * MSG_WORKER_REP
+ * Payload: [u8 success][u32 result_len][result]
+ * ------------------------------------------------------------------------- */
+
+uint8_t *ipc_encode_worker_rep(int success, const char *result,
+                                uint32_t *out_len) {
+    uint32_t rlen = result ? (uint32_t)strlen(result) : 0;
+    uint32_t sz   = 1 + sizeof(uint32_t) + rlen;
+    uint8_t *buf  = malloc(sz);
+    if (!buf) return NULL;
+    uint8_t *p = buf;
+    *p++ = (uint8_t)(success ? 1 : 0);
+    memcpy(p, &rlen, sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (rlen) memcpy(p, result, rlen);
+    *out_len = sz;
+    return buf;
+}
+
+int ipc_decode_worker_rep(const uint8_t *buf, uint32_t buf_len,
+                           int *success, char **result) {
+    *result = NULL;
+    if (buf_len < 5) return -1;
+    const uint8_t *p   = buf;
+    const uint8_t *end = buf + buf_len;
+    *success = (*p++ != 0) ? 1 : 0;
+    uint32_t rlen;
+    memcpy(&rlen, p, sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (rlen > 0 && p + rlen <= end) {
+        *result = malloc(rlen + 1);
+        if (*result) { memcpy(*result, p, rlen); (*result)[rlen] = '\0'; }
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * MSG_APPROVAL_REQ
+ * Payload: [u64 req_corr_id][u32 desc_len][description]
+ * ------------------------------------------------------------------------- */
+
+uint8_t *ipc_encode_approval_req(uint64_t req_corr_id, const char *description,
+                                  uint32_t *out_len) {
+    uint32_t dlen = description ? (uint32_t)strlen(description) : 0;
+    uint32_t sz   = sizeof(uint64_t) + sizeof(uint32_t) + dlen;
+    uint8_t *buf  = malloc(sz);
+    if (!buf) return NULL;
+    uint8_t *p = buf;
+    memcpy(p, &req_corr_id, sizeof(uint64_t)); p += sizeof(uint64_t);
+    memcpy(p, &dlen,        sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (dlen) memcpy(p, description, dlen);
+    *out_len = sz;
+    return buf;
+}
+
+int ipc_decode_approval_req(const uint8_t *buf, uint32_t buf_len,
+                             uint64_t *req_corr_id, char **description) {
+    *description = NULL;
+    if (buf_len < 12) return -1;
+    const uint8_t *p   = buf;
+    const uint8_t *end = buf + buf_len;
+    memcpy(req_corr_id, p, sizeof(uint64_t)); p += sizeof(uint64_t);
+    uint32_t dlen;
+    memcpy(&dlen, p, sizeof(uint32_t)); p += sizeof(uint32_t);
+    if (dlen > 0 && p + dlen <= end) {
+        *description = malloc(dlen + 1);
+        if (*description) { memcpy(*description, p, dlen); (*description)[dlen] = '\0'; }
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * MSG_APPROVAL_REP
+ * Payload: [u64 req_corr_id][u8 approved]
+ * ------------------------------------------------------------------------- */
+
+uint8_t *ipc_encode_approval_rep(uint64_t req_corr_id, int approved,
+                                  uint32_t *out_len) {
+    uint32_t sz  = sizeof(uint64_t) + 1;
+    uint8_t *buf = malloc(sz);
+    if (!buf) return NULL;
+    memcpy(buf, &req_corr_id, sizeof(uint64_t));
+    buf[sizeof(uint64_t)] = (uint8_t)(approved ? 1 : 0);
+    *out_len = sz;
+    return buf;
+}
+
+int ipc_decode_approval_rep(const uint8_t *buf, uint32_t buf_len,
+                             uint64_t *req_corr_id, int *approved) {
+    if (buf_len < sizeof(uint64_t) + 1) return -1;
+    memcpy(req_corr_id, buf, sizeof(uint64_t));
+    *approved = (buf[sizeof(uint64_t)] != 0) ? 1 : 0;
+    return 0;
+}
+

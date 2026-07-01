@@ -155,6 +155,10 @@ static char            selected_model[64]    = "grok-3-fast";
 static char            selected_provider[32] = "xai";
 static char            userhost[128]         = "user@host";
 
+/* Pending approval request from a backend worker */
+static uint64_t pending_approval_corr = 0;
+static char     pending_approval_desc[512] = "";
+
 /* --- Backend process management --- */
 
 #ifndef _WIN32
@@ -459,7 +463,13 @@ static void draw_layout(void) {
     werase(win_status);
     Session *active = sm_active_session(&sessions);
     int n_busy = inflight_count();
-    if (n_busy > 0)
+    if (pending_approval_corr != 0) {
+        /* Approval request takes over the status bar */
+        wattron(win_status, A_BOLD);
+        mvwprintw(win_status, 0, 2, " [APPROVE?] %.80s  [Y]es / [N]o",
+                  pending_approval_desc);
+        wattroff(win_status, A_BOLD);
+    } else if (n_busy > 0)
         mvwprintw(win_status, 0, 2, " %s/%s: %d request%s in flight | %s",
                   selected_provider, selected_model,
                   n_busy, n_busy > 1 ? "s" : "",
@@ -851,6 +861,37 @@ static void check_ipc(void) {
     } else if (msg.type == MSG_WORKER_END) {
         inflight_remove(msg.corr_id);
         draw_workers();
+    } else if (msg.type == MSG_WORKER_REP && msg.payload) {
+        /* Worker operation result: display in active chat */
+        int success = 0;
+        char *result = NULL;
+        if (ipc_decode_worker_rep(msg.payload, msg.payload_len,
+                                   &success, &result) == 0) {
+            ChatBuffer *cb = sm_active_chat(&sessions);
+            if (cb && result && *result) {
+                /* Show result as a system message (assistant role) */
+                char display[4096];
+                if (success)
+                    snprintf(display, sizeof(display), "[worker] %s", result);
+                else
+                    snprintf(display, sizeof(display), "[worker error] %s", result);
+                chat_add(cb, display, false);
+            }
+            free(result);
+        }
+        draw_layout();
+    } else if (msg.type == MSG_APPROVAL_REQ && msg.payload) {
+        /* Backend is requesting user approval for a mutating operation */
+        uint64_t req_corr_id = 0;
+        char *desc = NULL;
+        if (ipc_decode_approval_req(msg.payload, msg.payload_len,
+                                     &req_corr_id, &desc) == 0) {
+            pending_approval_corr = req_corr_id;
+            snprintf(pending_approval_desc, sizeof(pending_approval_desc),
+                     "%s", desc ? desc : "unknown operation");
+            free(desc);
+        }
+        draw_layout();
     } else if (msg.type == MSG_SESSION_RENAME && msg.payload) {
         uint32_t sidx = 0;
         char *topic = NULL;
@@ -1080,6 +1121,24 @@ int main(void) {
 
         if (ch == ERR) { check_ipc(); continue; }
         if (ch == KEY_RESIZE) { handle_resize(); continue; }
+
+        /* Approval prompt intercepts Y/N globally when active */
+        if (pending_approval_corr != 0 && (ch == 'y' || ch == 'Y' ||
+                                            ch == 'n' || ch == 'N')) {
+            int approved = (ch == 'y' || ch == 'Y') ? 1 : 0;
+            uint32_t rep_len;
+            uint8_t *rep = ipc_encode_approval_rep(pending_approval_corr,
+                                                    approved, &rep_len);
+            if (rep && ipc_fd != NET_INVALID) {
+                ipc_send(ipc_fd, MSG_APPROVAL_REP, pending_approval_corr,
+                         rep, rep_len);
+                free(rep);
+            }
+            pending_approval_corr = 0;
+            pending_approval_desc[0] = '\0';
+            draw_layout();
+            continue;
+        }
 
         if (focus == 0) {
             if (ch == 'n') { new_session(); continue; }

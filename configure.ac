@@ -24,6 +24,10 @@ AC_CHECK_LIB([panel], [new_panel], [], [
 # Checks for header files
 AC_CHECK_HEADERS([ncurses.h menu.h form.h panel.h])
 
+# ZeroMQ — comm bus transport (required)
+PKG_CHECK_MODULES([ZMQ], [libzmq >= 4.0.0], [],
+  [AC_MSG_ERROR([libzmq >= 4.0.0 not found. Install libzmq3-dev (Debian/Ubuntu) or zeromq (FreeBSD/macOS)])])
+
 # Optional: Check unit test framework
 PKG_CHECK_MODULES([CHECK], [check >= 0.9.6],
   [have_check=yes],

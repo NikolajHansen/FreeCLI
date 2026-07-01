@@ -9,6 +9,8 @@
 #include "provider_registry.h"
 #include "chat.h"
 #include "cJSON.h"
+#include "backend_worker.h"
+#include "../workers/fs_worker.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -349,6 +351,18 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Initialise worker registry and register built-in workers */
+    bw_registry_init();
+    {
+        BackendWorker *fs_w = fs_worker_create(NULL);  /* uses FREECLI_SANDBOX or ~/freecli-sandbox */
+        if (fs_w && fs_w->init(fs_w) == 0) {
+            bw_registry_add(fs_w);
+        } else if (fs_w) {
+            fs_w->free_w(fs_w);
+            fprintf(stderr, "[backend] filesystem worker disabled\n");
+        }
+    }
+
     /* Eagerly init xAI (default provider); others are lazy */
     if (!provider_xai.init(&provider_xai)) {
         fprintf(stderr, "[backend] warning: xAI provider init failed "
@@ -408,12 +422,23 @@ int main(int argc, char *argv[]) {
                 pthread_create(&tid, NULL, handle_request, ra);
                 pthread_detach(tid);
             }
+        } else if (msg.type == MSG_WORKER_REQ) {
+            BusContext bus = { fd };
+            bw_dispatch_msg(&bus, &msg);
+        } else if (msg.type == MSG_APPROVAL_REP && msg.payload) {
+            uint64_t req_corr_id;
+            int approved;
+            if (ipc_decode_approval_rep(msg.payload, msg.payload_len,
+                                         &req_corr_id, &approved) == 0) {
+                bw_notify_approval(req_corr_id, approved);
+            }
         }
 
         free(msg.payload);
     }
 
     net_close(fd);
+    bw_registry_free_all();
     shutdown_providers();
     net_cleanup();
     return 0;

@@ -1,4 +1,5 @@
-AM_CPPFLAGS = -I$(srcdir)/core -I$(srcdir)/ui -I$(srcdir)/providers
+AM_CPPFLAGS = -I$(srcdir)/core -I$(srcdir)/ui -I$(srcdir)/providers \
+              -I$(srcdir)/workers $(ZMQ_CFLAGS)
 
 bin_PROGRAMS = freecli freecli-backend
 
@@ -35,5 +36,7 @@ freecli_backend_SOURCES = \
 	core/utf8.c                           \
 	core/ipc.c                            \
 	core/cJSON.c                          \
-	core/provider.c
-freecli_backend_LDADD = -lcurl -lpthread
+	core/provider.c                       \
+	core/backend_worker.c                 \
+	workers/fs_worker.c
+freecli_backend_LDADD = -lcurl -lpthread $(ZMQ_LIBS)
