@@ -10,6 +10,7 @@ freecli_SOURCES = \
 	ui/commands.c                    \
 	ui/overlay.c                     \
 	core/chat.c                      \
+	core/utf8.c                      \
 	core/ipc.c                       \
 	core/cJSON.c                     \
 	providers/xai/xai_models.c       \
@@ -31,6 +32,7 @@ freecli_backend_SOURCES = \
 	providers/ibm/ibm_models.c            \
 	providers/registry.c                  \
 	core/chat.c                           \
+	core/utf8.c                           \
 	core/ipc.c                            \
 	core/cJSON.c                          \
 	core/provider.c

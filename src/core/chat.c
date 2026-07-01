@@ -1,4 +1,5 @@
 #include "chat.h"
+#include "utf8.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -92,100 +93,8 @@ void chat_scroll(ChatBuffer *cb, int delta) {
 }
 
 /* -----------------------------------------------------------------------
- * UTF-8 aware rendering helpers
+ * UTF-8 aware rendering helpers (implementations in utf8.c)
  * --------------------------------------------------------------------- */
-
-/* Byte length of one UTF-8 character starting at *s. */
-static int utf8_clen(const char *s) {
-    unsigned char c = (unsigned char)*s;
-    if (!c)       return 1;
-    if (c < 0x80) return 1;
-    if (c < 0xC0) return 1;  /* stray continuation — treat as 1 */
-    if (c < 0xE0) return 2;
-    if (c < 0xF0) return 3;
-    return 4;
-}
-
-/* Approximate display column width of the UTF-8 character at *s. */
-static int utf8_cwidth(const char *s) {
-    unsigned char c = (unsigned char)*s;
-    if (c < 0x80) return (c == '\t') ? 1 : 1;  /* control chars rare here */
-    if (c < 0xE0) return 1;   /* 2-byte: Latin ext, Cyrillic, Greek… */
-    if (c < 0xF0) {
-        unsigned int cp = ((c & 0x0F) << 12)
-                        | (((unsigned char)s[1] & 0x3F) << 6)
-                        | ((unsigned char)s[2] & 0x3F);
-        /* Double-width CJK blocks (simplified) */
-        if ((cp >= 0x1100 && cp <= 0x115F) ||
-            (cp >= 0x2E80 && cp <= 0x303E) ||
-            (cp >= 0x3040 && cp <= 0xA4CF) ||
-            (cp >= 0xAC00 && cp <= 0xD7A3) ||
-            (cp >= 0xF900 && cp <= 0xFAFF) ||
-            (cp >= 0xFF01 && cp <= 0xFF60) ||
-            (cp >= 0xFFE0 && cp <= 0xFFE6))
-            return 2;
-        return 1;
-    }
-    return 2;  /* 4-byte: emoji etc. */
-}
-
-/*
- * Find the end byte of a word-wrapped line starting at *text,
- * given that the first line starts at column x_start and the window
- * is width columns wide. indent is used for all continuation lines too.
- *
- * Returns pointer to first byte NOT included in this line.
- * *next_p is set to the first byte of the NEXT line (skips the break space/newline).
- */
-static const char *wrap_line_end(const char *text, int x_start, int width,
-                                  const char **next_p) {
-    int avail = width - x_start;
-    if (avail < 1) avail = 1;
-
-    const char *p          = text;
-    const char *last_space = NULL;   /* byte right after last space run */
-    const char *last_end   = NULL;   /* byte of the space character */
-    int col = 0;
-
-    while (*p && *p != '\n') {
-        int clen = utf8_clen(p);
-        int cw   = utf8_cwidth(p);
-
-        if (col + cw > avail) {
-            /* Overflow — break here */
-            if (last_space) {
-                *next_p = last_space;
-                return last_end;
-            }
-            /* No space found — hard break (never splits a multibyte seq) */
-            *next_p = p;
-            return p;
-        }
-
-        if (*p == ' ' || *p == '\t') {
-            /* Record the space position; the visual line ends before it */
-            if (col > 0) {   /* ignore leading spaces on first line */
-                last_end   = p;
-                last_space = p + clen;  /* next word starts here */
-                while (*last_space == ' ' || *last_space == '\t') last_space++;
-            }
-        }
-
-        col += cw;
-        p += clen;
-    }
-
-    /* Reached end-of-string or newline naturally */
-    *next_p = (*p == '\n') ? p + 1 : p;
-    return p;
-}
-
-/*
- * Render text into win starting at row y, first-line indent x_start.
- * Continuation lines are indented by `indent` columns.
- * Handles embedded \n. Never splits UTF-8.
- * Returns number of rows used.
- */
 static int render_wrapped(WINDOW *win, int y, int x_start, int indent,
                            int width, const char *text) {
     int max_y    = getmaxy(win);
@@ -215,26 +124,6 @@ static int render_wrapped(WINDOW *win, int y, int x_start, int indent,
         y++;
         rows++;
         x = indent;  /* continuation lines use indent */
-    }
-
-    return rows > 0 ? rows : 1;
-}
-
-/*
- * Count display rows for text without rendering.
- * Must use identical logic to render_wrapped.
- */
-static int count_rows(const char *text, int x_start, int indent, int width) {
-    int rows     = 0;
-    const char *p = text;
-    int x        = x_start;
-
-    while (*p) {
-        const char *next;
-        wrap_line_end(p, x, width, &next);
-        p = next;
-        rows++;
-        x = indent;
     }
 
     return rows > 0 ? rows : 1;
