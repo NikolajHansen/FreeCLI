@@ -24,5 +24,11 @@ AC_CHECK_LIB([panel], [new_panel], [], [
 # Checks for header files
 AC_CHECK_HEADERS([ncurses.h menu.h form.h panel.h])
 
-AC_CONFIG_FILES([Makefile src/Makefile])
+# Optional: Check unit test framework
+PKG_CHECK_MODULES([CHECK], [check >= 0.9.6],
+  [have_check=yes],
+  [have_check=no; AC_MSG_WARN([Check not found — unit tests disabled])])
+AM_CONDITIONAL([HAVE_CHECK], [test "x$have_check" = "xyes"])
+
+AC_CONFIG_FILES([Makefile src/Makefile tests/Makefile])
 AC_OUTPUT
